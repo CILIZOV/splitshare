@@ -1,0 +1,25 @@
+{
+  "name": "Splitshare",
+  "short_name": "Splitshare",
+  "description": "Track and split vacation expenses with your crew",
+  "start_url": "/splitshare/",
+  "scope": "/splitshare/",
+  "display": "standalone",
+  "background_color": "#1a1410",
+  "theme_color": "#e8956d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/splitshare/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/splitshare/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
