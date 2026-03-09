@@ -1,27 +1,31 @@
 import { useState, useEffect, useRef } from "react";
 
-// ─── Storage helpers ──────────────────────────────────────────────────────────
+// ─── Storage (shared across all users) ───────────────────────────────────────
 const s = {
   async get(k) {
-    try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; }
+    try { const r = await window.storage.get(k, true); return r ? JSON.parse(r.value) : null; }
     catch { return null; }
   },
   async set(k, v) {
-    try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+    try { await window.storage.set(k, JSON.stringify(v), true); } catch {}
+  },
+  async list(prefix) {
+    try { const r = await window.storage.list(prefix, true); return r ? r.keys : []; }
+    catch { return []; }
   },
 };
 
-// ─── Currencies ───────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 const CURRENCIES = ["USD","EUR","GBP","TRY","JPY","CAD","AUD","CHF","CNY","INR","MXN","BRL","SEK","NOK","DKK"];
-const SYMBOLS = { USD:"$",EUR:"€",GBP:"£",TRY:"₺",JPY:"¥",CAD:"CA$",AUD:"A$",CHF:"CHF",CNY:"¥",INR:"₹",MXN:"MX$",BRL:"R$",SEK:"kr",NOK:"kr",DKK:"kr" };
-
+const SYMBOLS    = { USD:"$",EUR:"€",GBP:"£",TRY:"₺",JPY:"¥",CAD:"CA$",AUD:"A$",CHF:"CHF",CNY:"¥",INR:"₹",MXN:"MX$",BRL:"R$",SEK:"kr",NOK:"kr",DKK:"kr" };
 const AVATAR_COLORS = ["#e8956d","#7ec8a4","#6db3e8","#c87ec0","#e8c96d","#e87e7e","#7eb3e8","#a4c87e"];
+
 const avatarColor = (name) => AVATAR_COLORS[Math.abs([...name].reduce((a,c)=>a+c.charCodeAt(0),0)) % AVATAR_COLORS.length];
 const initials    = (name) => name.trim().split(/\s+/).map(w=>w[0]).join("").toUpperCase().slice(0,2);
-
-function genCode() { return Math.random().toString(36).substring(2,8).toUpperCase(); }
-function genId()   { return Date.now().toString(36) + Math.random().toString(36).substring(2,5); }
-function fmtDate(ts) { return new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}); }
+const genCode     = () => Math.random().toString(36).substring(2,8).toUpperCase();
+const genId       = () => Date.now().toString(36) + Math.random().toString(36).substring(2,5);
+const fmtDate     = (ts) => new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});
+const fmt         = (amt, cur) => `${SYMBOLS[cur]||""}${parseFloat(amt).toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
@@ -30,7 +34,7 @@ export default function App() {
   const [flash,  setFlash]  = useState(null);
 
   function showFlash(msg, type="info") {
-    setFlash({msg,type}); setTimeout(()=>setFlash(null),3000);
+    setFlash({msg,type}); setTimeout(()=>setFlash(null),3500);
   }
 
   async function handleCreate(name, yourName) {
@@ -42,18 +46,28 @@ export default function App() {
     showFlash("Trip created! Share the code with your friends 🎉","success");
   }
 
+  // ── Join: look up trip by ID from shared storage ──────────────────────────
   async function handleJoin(tripId, code) {
     const data = await s.get(`trip:${tripId}`);
-    if (!data)                                          { showFlash("Trip not found.","error");   return; }
-    if (data.code.toUpperCase()!==code.toUpperCase())  { showFlash("Wrong code. Try again.","error"); return; }
+    if (!data) {
+      showFlash("Trip not found. Double-check the Trip ID.","error");
+      return;
+    }
+    if (data.code.toUpperCase() !== code.trim().toUpperCase()) {
+      showFlash("Wrong code. Try again.","error");
+      return;
+    }
     setTrip(data); setScreen("trip");
+    showFlash(`Welcome to ${data.name}!`,"success");
   }
+
+  function openTrip(t) { setTrip(t); setScreen("trip"); }
 
   return (
     <div style={styles.root}>
       <style>{CSS}</style>
       {flash && <Toast msg={flash.msg} type={flash.type} />}
-      {screen==="home"   && <Home    onCreate={()=>setScreen("create")} onJoin={()=>setScreen("join")} />}
+      {screen==="home"   && <Home    onCreate={()=>setScreen("create")} onJoin={()=>setScreen("join")} onOpenTrip={openTrip} />}
       {screen==="create" && <Create  onBack={()=>setScreen("home")} onCreate={handleCreate} />}
       {screen==="join"   && <Join    onBack={()=>setScreen("home")} onJoin={handleJoin} />}
       {screen==="trip"   && <TripPage trip={trip} onBack={()=>{setTrip(null);setScreen("home");}} showFlash={showFlash} />}
@@ -62,7 +76,17 @@ export default function App() {
 }
 
 // ─── Home ─────────────────────────────────────────────────────────────────────
-function Home({ onCreate, onJoin }) {
+function Home({ onCreate, onJoin, onOpenTrip }) {
+  const [recentTrips, setRecentTrips] = useState([]);
+
+  useEffect(()=>{
+    s.list("trip:").then(async keys => {
+      const trips = await Promise.all(keys.map(k => s.get(k)));
+      const valid = trips.filter(Boolean).sort((a,b)=>b.createdAt-a.createdAt).slice(0,6);
+      setRecentTrips(valid);
+    });
+  },[]);
+
   return (
     <div style={styles.page}>
       <div style={styles.hero}>
@@ -76,6 +100,26 @@ function Home({ onCreate, onJoin }) {
           <button className="btn-outline" onClick={onJoin}>Join a Trip</button>
         </div>
       </div>
+
+      {/* Recent Trips */}
+      {recentTrips.length > 0 && (
+        <div style={styles.recentSection}>
+          <div style={styles.recentHeading}>
+            <span style={styles.recentTitle}>Recent Trips</span>
+          </div>
+          <div style={styles.recentGrid}>
+            {recentTrips.map(t=>(
+              <div key={t.id} className="recent-card" onClick={()=>onOpenTrip(t)}>
+                <div style={styles.recentCardIcon}>✈️</div>
+                <div style={styles.recentCardName}>{t.name}</div>
+                <div style={styles.recentCardMeta}>by {t.createdBy}</div>
+                <div style={styles.recentCardDate}>{fmtDate(t.createdAt)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={styles.featGrid}>
         {[
           ["🗺️","Named Lists","Create a list for each destination — Rome, Bali, Tokyo."],
@@ -121,23 +165,32 @@ function Join({ onBack, onJoin }) {
   const [tripId, setTripId] = useState("");
   const [code,   setCode]   = useState("");
   const [loading,setLoading]= useState(false);
+
   function handleIdChange(v) {
+    // auto-extract trip ID from a pasted share link
     const m = v.match(/trip=([a-z0-9]+)/i);
     setTripId(m ? m[1] : v.trim());
   }
+
   async function submit() {
     if (!tripId.trim()||!code.trim()) return;
     setLoading(true); await onJoin(tripId.trim(), code.trim()); setLoading(false);
   }
+
   return (
-    <FormPage title="Join a Trip" sub="Paste the link or Trip ID, then enter the code." onBack={onBack}>
+    <FormPage title="Join a Trip" sub="Paste the shareable link or enter the Trip ID + code." onBack={onBack}>
       <label style={styles.label}>Trip Link or ID</label>
       <input className="inp" placeholder="Paste link or trip ID" value={tripId} onChange={e=>handleIdChange(e.target.value)} />
       <label style={styles.label}>Access Code</label>
-      <input className="inp" placeholder="6-character code" value={code} onChange={e=>setCode(e.target.value.toUpperCase())} maxLength={6} onKeyDown={e=>e.key==="Enter"&&submit()} />
+      <input className="inp" placeholder="6-character code e.g. A3BX9Z" value={code}
+        onChange={e=>setCode(e.target.value.toUpperCase())} maxLength={6}
+        onKeyDown={e=>e.key==="Enter"&&submit()} />
       <button className="btn-primary" style={{marginTop:8}} onClick={submit} disabled={!tripId.trim()||!code.trim()||loading}>
         {loading?"Joining…":"Join Trip →"}
       </button>
+      <p style={{fontSize:12,color:"var(--muted)",lineHeight:1.6,marginTop:4}}>
+        💡 The trip creator should share both the <strong>link</strong> and the <strong>6-letter code</strong> with you.
+      </p>
     </FormPage>
   );
 }
@@ -172,12 +225,9 @@ function TripPage({ trip, onBack, showFlash }) {
     showFlash("Removed.","info");
   }
 
-  // derived
-  const people = [...new Set(expenses.map(e=>e.addedBy))].sort();
-
+  const people   = [...new Set(expenses.map(e=>e.addedBy))].sort();
   const filtered = expenses.filter(e => filterPerson==="all" || e.addedBy===filterPerson);
-
-  const sorted = [...filtered].sort((a,b)=>{
+  const sorted   = [...filtered].sort((a,b)=>{
     if (sortBy==="date-desc")  return b.createdAt - a.createdAt;
     if (sortBy==="date-asc")   return a.createdAt - b.createdAt;
     if (sortBy==="amt-desc")   return b.amount - a.amount;
@@ -207,10 +257,10 @@ function TripPage({ trip, onBack, showFlash }) {
       {/* Stats */}
       <div style={styles.statsRow}>
         {[
-          [expenses.length, "Expenses"],
-          [people.length||"–", "People"],
-          [expenses.filter(e=>e.photo).length, "Photos"],
-          [[...new Set(expenses.map(e=>e.currency))].length||"–", "Currencies"],
+          [expenses.length,  "Expenses"],
+          [people.length||"–","People"],
+          [expenses.filter(e=>e.photo).length,"Photos"],
+          [[...new Set(expenses.map(e=>e.currency))].length||"–","Currencies"],
         ].map(([n,l])=>(
           <div key={l} style={styles.statCard}>
             <span style={styles.statNum}>{n}</span>
@@ -222,36 +272,31 @@ function TripPage({ trip, onBack, showFlash }) {
       {/* Controls */}
       <div style={styles.controlsBar}>
         <div style={styles.filterRow}>
-          <span style={styles.controlLabel}>Filter by person</span>
+          <span style={styles.controlLabel}>Filter</span>
           <div style={styles.filterChips}>
             <button className={`chip${filterPerson==="all"?" chip-active":""}`} onClick={()=>setFilterPerson("all")}>All</button>
             {people.map(p=>(
               <button key={p} className={`chip${filterPerson===p?" chip-active":""}`} onClick={()=>setFilterPerson(p)}>
-                <Avatar name={p} size={18} />
-                {p}
+                <Avatar name={p} size={18}/>{p}
               </button>
             ))}
           </div>
         </div>
         <div style={styles.sortRow}>
-          <span style={styles.controlLabel}>Sort by</span>
+          <span style={styles.controlLabel}>Sort</span>
           <div style={styles.sortChips}>
-            {[
-              ["date-desc","Date ↓"],["date-asc","Date ↑"],
-              ["amt-desc","Amount ↓"],["amt-asc","Amount ↑"],
-              ["person-az","Person A–Z"],
-            ].map(([val,label])=>(
+            {[["date-desc","Date ↓"],["date-asc","Date ↑"],["amt-desc","Amount ↓"],["amt-asc","Amount ↑"],["person-az","Person A–Z"]].map(([val,label])=>(
               <button key={val} className={`chip${sortBy===val?" chip-active":""}`} onClick={()=>setSortBy(val)}>{label}</button>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Add + count row */}
+      {/* Count + Add */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <span style={{fontSize:13,color:"var(--muted)"}}>
           Showing <strong style={{color:"var(--fg)"}}>{sorted.length}</strong> expense{sorted.length!==1?"s":""}
-          {filterPerson!=="all" ? <> · <span style={{color:"var(--accent)"}}>{filterPerson}</span></> : ""}
+          {filterPerson!=="all"&&<> · <span style={{color:"var(--accent)"}}>{filterPerson}</span></>}
         </span>
         <button className="btn-primary" onClick={()=>setShowAdd(true)}>+ Add Expense</button>
       </div>
@@ -263,7 +308,7 @@ function TripPage({ trip, onBack, showFlash }) {
         <div style={styles.empty}>
           <span style={{fontSize:44}}>🧾</span>
           <p style={{marginTop:12,color:"var(--muted)"}}>
-            {expenses.length===0 ? "No expenses yet. Add your first one!" : "No expenses match this filter."}
+            {expenses.length===0?"No expenses yet. Add your first one!":"No expenses match this filter."}
           </p>
         </div>
       ) : (
@@ -276,10 +321,10 @@ function TripPage({ trip, onBack, showFlash }) {
         </div>
       )}
 
-      {showAdd     && <AddModal   onClose={()=>setShowAdd(false)}    onAdd={addExpense} />}
-      {showShare   && <ShareModal trip={trip} link={shareLink} onClose={()=>setShowShare(false)} showFlash={showFlash} />}
+      {showAdd     && <AddModal    onClose={()=>setShowAdd(false)} onAdd={addExpense} />}
+      {showShare   && <ShareModal  trip={trip} link={shareLink} onClose={()=>setShowShare(false)} showFlash={showFlash} />}
       {showSummary && <SummaryModal expenses={expenses} onClose={()=>setShowSummary(false)} />}
-      {viewPhoto   && <PhotoModal src={viewPhoto} onClose={()=>setViewPhoto(null)} />}
+      {viewPhoto   && <PhotoModal  src={viewPhoto} onClose={()=>setViewPhoto(null)} />}
     </div>
   );
 }
@@ -297,8 +342,8 @@ function ExpenseRow({ exp, onDelete, onViewPhoto }) {
           <div style={{minWidth:0}}>
             <div style={styles.expDesc}>{exp.description}</div>
             <div style={styles.expPersonRow}>
-              <Avatar name={exp.addedBy} size={20} />
-              <span style={{...styles.expPersonName, color:avatarColor(exp.addedBy)}}>{exp.addedBy}</span>
+              <Avatar name={exp.addedBy} size={20}/>
+              <span style={{...styles.expPersonName,color:avatarColor(exp.addedBy)}}>{exp.addedBy}</span>
               <span style={styles.expDot}>·</span>
               <span style={styles.expDate}>{fmtDate(exp.createdAt)}</span>
             </div>
@@ -306,12 +351,10 @@ function ExpenseRow({ exp, onDelete, onViewPhoto }) {
         </div>
         <div style={styles.expRight}>
           <div style={styles.expAmtWrap}>
-            <span style={styles.expAmount}>
-              {SYMBOLS[exp.currency]||""}{parseFloat(exp.amount).toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}
-            </span>
+            <span style={styles.expAmount}>{fmt(exp.amount, exp.currency)}</span>
             <span style={styles.expCurrency}>{exp.currency}</span>
           </div>
-          <span style={{...styles.chevron, transform:open?"rotate(180deg)":"rotate(0deg)"}}>▾</span>
+          <span style={{...styles.chevron,transform:open?"rotate(180deg)":"rotate(0deg)"}}>▾</span>
         </div>
       </div>
       {open && (
@@ -326,95 +369,111 @@ function ExpenseRow({ exp, onDelete, onViewPhoto }) {
 
 // ─── Summary Modal ────────────────────────────────────────────────────────────
 function SummaryModal({ expenses, onClose }) {
-  const people = [...new Set(expenses.map(e=>e.addedBy))];
-
-  // per-person totals per currency
-  const byPerson = {};
-  for (const e of expenses) {
-    if (!byPerson[e.addedBy]) byPerson[e.addedBy] = { counts:{}, totals:{} };
-    byPerson[e.addedBy].counts[e.currency] = (byPerson[e.addedBy].counts[e.currency]||0) + 1;
-    byPerson[e.addedBy].totals[e.currency] = (byPerson[e.addedBy].totals[e.currency]||0) + (parseFloat(e.amount)||0);
+  if (expenses.length === 0) {
+    return (
+      <Modal title="Expense Summary" onClose={onClose}>
+        <p style={{color:"var(--muted)",textAlign:"center",padding:"20px 0"}}>No expenses to summarize yet.</p>
+      </Modal>
+    );
   }
 
-  // grand totals per currency
-  const grandTotals = {};
+  // ── Build per-person totals per currency ──────────────────────────────────
+  const byPerson = {}; // { personName: { USD: 120.5, EUR: 30 } }
+  for (const e of expenses) {
+    if (!byPerson[e.addedBy]) byPerson[e.addedBy] = {};
+    byPerson[e.addedBy][e.currency] = (byPerson[e.addedBy][e.currency]||0) + (parseFloat(e.amount)||0);
+  }
+
+  // ── Grand totals per currency ─────────────────────────────────────────────
+  const grandTotals = {}; // { USD: 500, EUR: 200 }
   for (const e of expenses) {
     grandTotals[e.currency] = (grandTotals[e.currency]||0) + (parseFloat(e.amount)||0);
   }
 
+  // ── Sort people by total (sum across all currencies, approximation) ───────
   const sortedPeople = Object.entries(byPerson).sort((a,b)=>{
-    const sumA = Object.values(a[1].totals).reduce((s,v)=>s+v,0);
-    const sumB = Object.values(b[1].totals).reduce((s,v)=>s+v,0);
+    const sumA = Object.values(a[1]).reduce((s,v)=>s+v,0);
+    const sumB = Object.values(b[1]).reduce((s,v)=>s+v,0);
     return sumB - sumA;
   });
 
   return (
     <Modal title="Expense Summary" onClose={onClose}>
-      {expenses.length===0 ? (
-        <p style={{color:"var(--muted)",textAlign:"center",padding:"20px 0"}}>No expenses to summarize yet.</p>
-      ) : (<>
 
-        {/* Per-person cards */}
-        <div style={styles.summHeading}>Who spent what</div>
-        {sortedPeople.map(([person,{totals,counts}])=>{
-          const expCount = Object.values(counts).reduce((s,v)=>s+v,0);
-          const pct      = Math.round(expCount/expenses.length*100);
-          const color    = avatarColor(person);
-          return (
-            <div key={person} style={styles.summPersonCard}>
-              <div style={styles.summPersonHead}>
-                <Avatar name={person} size={40} />
-                <div style={{flex:1}}>
-                  <div style={{...styles.summPersonName, color}}>{person}</div>
-                  <div style={styles.summPersonCount}>{expCount} expense{expCount!==1?"s":""} · {pct}% of total</div>
+      {/* ── Per-person breakdown ── */}
+      <div style={styles.summHeading}>Who spent what</div>
+
+      {sortedPeople.map(([person, byCur])=>{
+        const color = avatarColor(person);
+        return (
+          <div key={person} style={styles.summPersonCard}>
+            {/* Person header */}
+            <div style={styles.summPersonHead}>
+              <Avatar name={person} size={40}/>
+              <div style={{flex:1}}>
+                <div style={{...styles.summPersonName, color}}>{person}</div>
+                <div style={styles.summPersonCount}>
+                  {Object.keys(byCur).length} currenc{Object.keys(byCur).length===1?"y":"ies"} · {expenses.filter(e=>e.addedBy===person).length} expenses
                 </div>
               </div>
-              {/* bar */}
-              <div style={styles.summBarBg}>
-                <div style={{...styles.summBarFill, width:`${pct}%`, background:color}} />
-              </div>
-              {/* amounts per currency */}
-              <div style={styles.summAmounts}>
-                {Object.entries(totals).sort((a,b)=>b[1]-a[1]).map(([cur,amt])=>(
-                  <div key={cur} style={styles.summAmtRow}>
-                    <span style={styles.summCurTag}>{cur}</span>
-                    <span style={styles.summAmt}>
-                      {SYMBOLS[cur]||""}{amt.toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}
-                    </span>
-                  </div>
-                ))}
-              </div>
             </div>
-          );
-        })}
 
-        {/* Divider */}
-        <div style={{height:1,background:"var(--border)",margin:"4px 0"}} />
+            {/* Per-currency breakdown with % bar */}
+            {Object.entries(byCur).sort((a,b)=>b[1]-a[1]).map(([cur, amt])=>{
+              const grandForCur = grandTotals[cur] || 1;
+              const pct         = (amt / grandForCur * 100);
+              return (
+                <div key={cur} style={styles.summCurBlock}>
+                  <div style={styles.summAmtRow}>
+                    <span style={styles.summCurTag}>{cur}</span>
+                    <span style={styles.summAmt}>{fmt(amt, cur)}</span>
+                    <span style={styles.summPct}>{pct.toFixed(1)}%</span>
+                  </div>
+                  {/* bar showing share of this currency's total */}
+                  <div style={styles.summBarBg}>
+                    <div style={{...styles.summBarFill, width:`${pct}%`, background:color}} />
+                  </div>
+                  <div style={styles.summBarLabel}>
+                    of {fmt(grandForCur, cur)} total in {cur}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
 
-        {/* Grand totals */}
-        <div style={styles.summHeading}>Trip grand total</div>
-        {Object.entries(grandTotals).sort((a,b)=>b[1]-a[1]).map(([cur,amt])=>(
-          <div key={cur} style={styles.summTotalRow}>
-            <span style={styles.summCurTag}>{cur}</span>
+      {/* ── Divider ── */}
+      <div style={{height:1,background:"var(--border)",margin:"4px 0"}}/>
+
+      {/* ── Grand totals ── */}
+      <div style={styles.summHeading}>Trip grand totals</div>
+      {Object.entries(grandTotals).sort((a,b)=>b[1]-a[1]).map(([cur,amt])=>(
+        <div key={cur} style={styles.summTotalRow}>
+          <span style={styles.summCurTag}>{cur}</span>
+          <div>
             <span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:24,fontWeight:700}}>
-              {SYMBOLS[cur]||""}{amt.toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}
+              {fmt(amt, cur)}
+            </span>
+            <span style={{fontSize:12,color:"var(--muted)",marginLeft:8}}>
+              across {expenses.filter(e=>e.currency===cur).length} expense{expenses.filter(e=>e.currency===cur).length!==1?"s":""}
             </span>
           </div>
-        ))}
+        </div>
+      ))}
 
-      </>)}
     </Modal>
   );
 }
 
 // ─── Add Modal ────────────────────────────────────────────────────────────────
 function AddModal({ onClose, onAdd }) {
-  const [desc,     setDesc]     = useState("");
-  const [who,      setWho]      = useState("");
-  const [amount,   setAmount]   = useState("");
-  const [currency, setCurrency] = useState("EUR");
-  const [photo,    setPhoto]    = useState(null);
-  const [imgLoading,setImgLoading] = useState(false);
+  const [desc,      setDesc]      = useState("");
+  const [who,       setWho]       = useState("");
+  const [amount,    setAmount]    = useState("");
+  const [currency,  setCurrency]  = useState("EUR");
+  const [photo,     setPhoto]     = useState(null);
+  const [imgLoading,setImgLoading]= useState(false);
   const fileRef = useRef();
 
   function handleFile(e) {
@@ -448,8 +507,7 @@ function AddModal({ onClose, onAdd }) {
         </div>
       </div>
       <label style={styles.label}>Photo <span style={{color:"var(--muted)",fontSize:12}}>(optional)</span></label>
-      <div className="photo-drop" onClick={()=>fileRef.current.click()}
-           style={photo ? styles.photoPreviewWrap : styles.photoDrop}>
+      <div className="photo-drop" onClick={()=>fileRef.current.click()} style={photo?styles.photoPreviewWrap:styles.photoDrop}>
         {imgLoading ? <span className="spin">◌</span>
           : photo   ? <img src={photo} style={styles.photoPreview} alt="preview" />
           :            <span>📎 Click to attach a photo</span>}
@@ -468,12 +526,8 @@ function ShareModal({ trip, link, onClose, showFlash }) {
   function copy(text) { navigator.clipboard.writeText(text).then(()=>showFlash("Copied!","success")); }
   return (
     <Modal title="Share This Trip" onClose={onClose}>
-      <div style={styles.shareBlock}>
-        <span style={styles.shareLabel}>Trip ID</span>
-        <div style={styles.shareRow}>
-          <code style={styles.shareCode}>{trip.id}</code>
-          <button className="copy-btn" onClick={()=>copy(trip.id)}>Copy</button>
-        </div>
+      <div style={{background:"var(--accent-light)",border:"1px solid var(--accent)",borderRadius:12,padding:"12px 16px",fontSize:13,color:"var(--fg)",lineHeight:1.7}}>
+        📋 Share <strong>both</strong> the link and the code. Your friends need <strong>both</strong> to join.
       </div>
       <div style={styles.shareBlock}>
         <span style={styles.shareLabel}>Access Code</span>
@@ -483,15 +537,22 @@ function ShareModal({ trip, link, onClose, showFlash }) {
         </div>
       </div>
       <div style={styles.shareBlock}>
+        <span style={styles.shareLabel}>Trip ID (for manual entry)</span>
+        <div style={styles.shareRow}>
+          <code style={styles.shareCode}>{trip.id}</code>
+          <button className="copy-btn" onClick={()=>copy(trip.id)}>Copy</button>
+        </div>
+      </div>
+      <div style={styles.shareBlock}>
         <span style={styles.shareLabel}>Shareable Link</span>
         <div style={styles.shareRow}>
           <code style={{...styles.shareCode,fontSize:11,wordBreak:"break-all"}}>{link}</code>
           <button className="copy-btn" onClick={()=>copy(link)}>Copy</button>
         </div>
       </div>
-      <p style={{fontSize:13,color:"var(--muted)",lineHeight:1.6}}>
-        Share the <strong>link + code</strong> with your travel crew. Without the code, nobody can access this trip.
-      </p>
+      <button className="btn-primary" style={{width:"100%"}} onClick={()=>copy(`${link}\nCode: ${trip.code}`)}>
+        📋 Copy Link + Code Together
+      </button>
     </Modal>
   );
 }
@@ -511,11 +572,7 @@ function PhotoModal({ src, onClose }) {
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 function Avatar({ name, size=28 }) {
   return (
-    <div style={{
-      width:size, height:size, borderRadius:"50%", background:avatarColor(name),
-      display:"flex", alignItems:"center", justifyContent:"center",
-      fontSize:size*0.38, fontWeight:800, color:"#1a1410", flexShrink:0,
-    }}>
+    <div style={{width:size,height:size,borderRadius:"50%",background:avatarColor(name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.38,fontWeight:800,color:"#1a1410",flexShrink:0}}>
       {initials(name)}
     </div>
   );
@@ -559,13 +616,19 @@ const styles = {
   root:{ minHeight:"100vh", background:"var(--bg)", color:"var(--fg)", fontFamily:"'DM Sans', sans-serif" },
   page:{ maxWidth:740, margin:"0 auto", padding:"32px 20px 80px" },
 
-  hero:{ textAlign:"center", padding:"60px 20px 48px", display:"flex", flexDirection:"column", alignItems:"center" },
-  logoWrap:{ display:"flex", alignItems:"center", gap:12, marginBottom:16 },
+  hero:{ textAlign:"center", padding:"48px 20px 36px", display:"flex", flexDirection:"column", alignItems:"center" },
+  logoWrap:{ display:"flex", alignItems:"center", gap:12, marginBottom:14 },
   logoIcon:{ fontSize:28, color:"var(--accent)" },
   logo:{ fontFamily:"'Cormorant Garamond', serif", fontSize:52, fontWeight:700, margin:0, letterSpacing:-1 },
-  tagline:{ fontSize:17, color:"var(--muted)", maxWidth:420, lineHeight:1.7, marginBottom:36 },
+  tagline:{ fontSize:17, color:"var(--muted)", maxWidth:420, lineHeight:1.7, marginBottom:32 },
   btnRow:{ display:"flex", gap:14, flexWrap:"wrap", justifyContent:"center" },
-  featGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))", gap:16, marginTop:16 },
+
+  recentSection:{ marginBottom:32 },
+  recentHeading:{ display:"flex", alignItems:"center", marginBottom:14 },
+  recentTitle:{ fontSize:13, fontWeight:700, textTransform:"uppercase", letterSpacing:.8, color:"var(--muted)" },
+  recentGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 },
+
+  featGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))", gap:16, marginTop:8 },
   featCard:{ background:"var(--card)", borderRadius:16, padding:"24px 20px", display:"flex", flexDirection:"column", gap:8, border:"1px solid var(--border)" },
   featIcon:{ fontSize:28 }, featTitle:{ fontSize:15, fontWeight:700 },
   featDesc:{ fontSize:13, color:"var(--muted)", lineHeight:1.6, margin:0 },
@@ -590,7 +653,7 @@ const styles = {
   controlsBar:{ background:"var(--card)", border:"1px solid var(--border)", borderRadius:16, padding:"14px 16px", marginBottom:18, display:"flex", flexDirection:"column", gap:14 },
   filterRow:{ display:"flex", alignItems:"flex-start", gap:10, flexWrap:"wrap" },
   sortRow:{ display:"flex", alignItems:"flex-start", gap:10, flexWrap:"wrap" },
-  controlLabel:{ fontSize:11, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.8, paddingTop:6, flexShrink:0, minWidth:90 },
+  controlLabel:{ fontSize:11, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.8, paddingTop:6, flexShrink:0, minWidth:50 },
   filterChips:{ display:"flex", gap:7, flexWrap:"wrap", flex:1 },
   sortChips:{ display:"flex", gap:7, flexWrap:"wrap", flex:1 },
 
@@ -613,22 +676,25 @@ const styles = {
   chevron:{ fontSize:14, color:"var(--muted)", transition:"transform .2s" },
   expActions:{ display:"flex", gap:10, padding:"10px 16px 14px", borderTop:"1px solid var(--border)" },
 
+  // ── summary ──
   summHeading:{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:.9, color:"var(--muted)", marginBottom:2 },
-  summPersonCard:{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:14, padding:"16px", display:"flex", flexDirection:"column", gap:10 },
+  summPersonCard:{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:14, padding:"16px", display:"flex", flexDirection:"column", gap:12 },
   summPersonHead:{ display:"flex", alignItems:"center", gap:12 },
   summPersonName:{ fontWeight:700, fontSize:17 },
   summPersonCount:{ fontSize:12, color:"var(--muted)" },
-  summBarBg:{ height:5, borderRadius:4, background:"var(--border)", overflow:"hidden" },
+  summCurBlock:{ display:"flex", flexDirection:"column", gap:5 },
+  summAmtRow:{ display:"flex", alignItems:"center", gap:10 },
+  summCurTag:{ background:"var(--accent-light)", color:"var(--accent)", fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:20, flexShrink:0 },
+  summAmt:{ fontFamily:"'Cormorant Garamond',serif", fontSize:20, fontWeight:700, flex:1 },
+  summPct:{ fontSize:13, fontWeight:700, color:"var(--fg)" },
+  summBarBg:{ height:6, borderRadius:4, background:"var(--border)", overflow:"hidden" },
   summBarFill:{ height:"100%", borderRadius:4, transition:"width .6s ease" },
-  summAmounts:{ display:"flex", flexDirection:"column", gap:6 },
-  summAmtRow:{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 },
-  summCurTag:{ background:"var(--accent-light)", color:"var(--accent)", fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:20 },
-  summAmt:{ fontFamily:"'Cormorant Garamond', serif", fontSize:20, fontWeight:700 },
+  summBarLabel:{ fontSize:11, color:"var(--muted)" },
   summTotalRow:{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 16px", background:"var(--bg)", border:"1px solid var(--border)", borderRadius:12 },
 
   overlay:{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", backdropFilter:"blur(4px)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:100, padding:20 },
   modal:{ background:"var(--card)", borderRadius:20, width:"100%", maxWidth:500, maxHeight:"90vh", overflow:"auto", border:"1px solid var(--border)" },
-  modalHead:{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"20px 24px 0", position:"sticky", top:0, background:"var(--card)", zIndex:1, paddingBottom:12, borderBottom:"1px solid var(--border)" },
+  modalHead:{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"20px 24px 12px", position:"sticky", top:0, background:"var(--card)", zIndex:1, borderBottom:"1px solid var(--border)" },
   modalTitle:{ fontFamily:"'Cormorant Garamond', serif", fontSize:26, fontWeight:700, margin:0 },
   modalBody:{ padding:"16px 24px 28px", display:"flex", flexDirection:"column", gap:14 },
 
@@ -681,10 +747,19 @@ const CSS = `
   .chip{background:var(--bg);border:1px solid var(--border);color:var(--muted);padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;display:inline-flex;align-items:center;gap:6px;transition:border-color .2s,color .2s,background .2s;white-space:nowrap;}
   .chip:hover{border-color:var(--accent);color:var(--fg);}
   .chip-active{border-color:var(--accent)!important;color:var(--accent)!important;background:var(--accent-light)!important;}
+  .recent-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px 16px;cursor:pointer;transition:border-color .2s,transform .15s;display:flex;flex-direction:column;gap:6px;}
+  .recent-card:hover{border-color:var(--accent);transform:translateY(-2px);}
   .exp-card:hover{box-shadow:0 2px 16px rgba(0,0,0,.2);}
   .photo-drop:hover{border-color:var(--accent)!important;}
   @keyframes spin{to{transform:rotate(360deg);}}
   .spin{display:inline-block;animation:spin 1s linear infinite;}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
   .exp-card{animation:fadeIn .22s ease both;}
+  .recent-card{animation:fadeIn .3s ease both;}
 `;
+
+// inject recent card text styles into JS (can't use CSS classes for dynamic content)
+styles.recentCardIcon = { fontSize:28, marginBottom:4 };
+styles.recentCardName = { fontWeight:700, fontSize:15, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" };
+styles.recentCardMeta = { fontSize:12, color:"var(--muted)" };
+styles.recentCardDate = { fontSize:11, color:"var(--muted)", marginTop:2 };
